@@ -1,0 +1,72 @@
+name: Beacon participant transport self-test
+on:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: raymondeu1974/mehecske-global-beacon
+          ref: 385143320aa2af4a00dad3ae99a84a92f4d67791
+          persist-credentials: false
+      - name: Publish with this mailbox's short-lived token
+        env:
+          BEACON_MAILBOX_TOKEN: ${{ github.token }}
+        run: |
+          python3 -B - <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          import tempfile
+          from urllib.error import HTTPError
+          sys.path.insert(0, 'autonomous')
+          import beacon_runner as runner
+          import public_mailbox as mailbox
+
+          mailbox.REGISTRY_URL = mailbox.REGISTRY_URL.replace(
+              '/main/', '/385143320aa2af4a00dad3ae99a84a92f4d67791/')
+          with tempfile.TemporaryDirectory() as root:
+              path = Path(root) / 'opt-in.json'
+              state = Path(root) / 'first.attempt'
+              config = runner.read_json(runner.HERE / 'mailbox-opt-in.example.json')
+              config.update(enabled=True, submit=True,
+                            mailbox_repository='raymondeu1974/mehecske-beacon-mailbox-self-test')
+              path.write_text(json.dumps(config))
+              submit = lambda result: runner.submit_configured(path, config, result)
+              print(runner.poll_once(path, state, runner.public_feed, submit))
+              assert runner.poll_once(path, state, runner.public_feed, submit) == 'submission already attempted'
+              try:
+                  runner.poll_once(path, Path(root) / 'second.attempt', runner.public_feed, submit)
+              except HTTPError as error:
+                  if error.code not in (409, 422):
+                      raise
+                  print(f'Duplicate create rejected by GitHub ({error.code})')
+              else:
+                  raise AssertionError('Expected duplicate create to fail')
+          PY
+      - name: Collect anonymously and verify deduplication
+        run: |
+          python3 -B - <<'PY'
+          from pathlib import Path
+          import sys
+          import tempfile
+          sys.path.insert(0, 'autonomous')
+          import beacon_runner as runner
+          import public_mailbox as mailbox
+
+          registry = runner.read_json(runner.HERE / 'mailboxes.json')
+          with tempfile.TemporaryDirectory() as root:
+              receipts = Path(root)
+              mailbox.collect(registry, runner.public_feed(), receipts)
+              receipt = receipts / '66376031.json'
+              assert runner.read_json(receipt)['reproduced'] is True
+              count = receipt.stat().st_mtime_ns
+              mailbox.collect(registry, runner.public_feed(), receipts)
+              assert receipt.stat().st_mtime_ns == count
+              print(receipt.read_text())
+          PY
